@@ -1,0 +1,6 @@
+{
+  "name": "Qwen Agent Studio",
+  "description": "Autonomous code and repository reasoning agents for finding and correcting errors across Python, Rust, Java, JavaScript, C, and C++.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
