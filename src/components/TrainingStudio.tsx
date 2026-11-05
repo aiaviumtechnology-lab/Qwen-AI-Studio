@@ -27,6 +27,7 @@ import {
 import { TrainingTelemetry } from './TrainingTelemetry';
 import { TrainingDataPreview } from './TrainingDataPreview';
 import { HyperparameterManager } from './HyperparameterManager';
+import { TrainingExperimentList } from './TrainingExperimentList';
 
 const TB = String.fromCharCode(96, 96, 96);
 
@@ -995,6 +996,9 @@ ${
 
       {/* Reasoning Dataset Pre-Flight Inspector & Formatter */}
       <TrainingDataPreview maxContextLength={config.contextLength} />
+
+      {/* PostgreSQL Experiment Records & Audit History */}
+      <TrainingExperimentList currentConfig={config} onApplyConfig={setConfig} />
 
       {/* Code Snippets & Artifacts Viewer */}
       <div className="space-y-3">

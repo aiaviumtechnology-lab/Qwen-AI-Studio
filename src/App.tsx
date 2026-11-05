@@ -8,6 +8,8 @@ import { BpeInspector } from './components/BpeInspector';
 import { PipelineExporter } from './components/PipelineExporter';
 import { TrainingStudio } from './components/TrainingStudio';
 import { RcaEngine } from './components/RcaEngine';
+import { OpsDashboard } from './components/OpsDashboard';
+import { GeminiChatbot } from './components/GeminiChatbot';
 import { DEFAULT_AGENTS } from './data/defaultAgents';
 import { PRESET_REPOSITORIES } from './data/presetRepos';
 import { AgentConfig, PresetRepository, AuditResult, CodeIssue, PatchedFile } from './types/agent';
@@ -102,6 +104,21 @@ export default function App() {
 
       {/* Main Workspace Body */}
       <main className="flex-1 flex overflow-hidden">
+        {activeTab === 'dashboard' && (
+          <OpsDashboard
+            currentRepo={currentRepo}
+            onSelectRepo={setCurrentRepo}
+            currentAgent={currentAgent}
+          />
+        )}
+
+        {activeTab === 'gemini-chat' && (
+          <GeminiChatbot
+            currentRepo={currentRepo}
+            activeFilePath={activeFilePath}
+          />
+        )}
+
         {activeTab === 'agent-studio' && (
           <AgentStudio
             currentAgent={currentAgent}

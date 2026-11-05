@@ -250,6 +250,40 @@ Reasoning Agent: ${agent.name}
       };
     });
 
+    // Record audit session in PostgreSQL
+    try {
+      const issueCount = (parsedJson.issues || []).length;
+      const criticalCount = (parsedJson.issues || []).filter((i: any) => i.severity === 'critical').length;
+      const warningCount = (parsedJson.issues || []).filter((i: any) => i.severity === 'warning').length;
+      await dbService.saveAuditLog({
+        target: `${targetFile.path} (${agent.name})`,
+        eventType: 'CODE_AUDIT_SESSION',
+        severity: criticalCount > 0 ? 'critical' : issueCount > 0 ? 'warning' : 'info',
+        details: {
+          summary: parsedJson.summary || 'Code reasoning audit executed.',
+          totalIssues: issueCount,
+          criticalIssues: criticalCount,
+          warningIssues: warningCount,
+          infoIssues: issueCount - criticalCount - warningCount,
+          language: targetFile.language,
+          issues: (parsedJson.issues || []).map((i: any) => ({
+            id: i.id,
+            title: i.title,
+            severity: i.severity,
+            line: i.line,
+            ruleBroken: i.ruleBroken,
+            file: i.file,
+          })),
+          patchedFilesCount: patchedFilesWithDiff.length,
+          agentName: agent.name,
+          reasoningDepth: agent.reasoningDepth,
+        },
+        actor: agent.name,
+      });
+    } catch (saveErr) {
+      console.warn('Failed to record audit session in PostgreSQL:', saveErr);
+    }
+
     return res.json({
       thinking,
       summary: parsedJson.summary || 'Agent audit complete. Issues analyzed and corrections formulated.',
@@ -520,6 +554,230 @@ function generateIntelligentFallback(targetFile: FilePayload, agent: AgentConfig
     ],
   };
 }
+
+import { dbService } from './src/services/db.ts';
+
+// ----------------------------------------------------
+// PostgreSQL Database Endpoints for Training & Audits
+// ----------------------------------------------------
+
+// List or filter experiments
+app.get('/api/experiments', async (req: Request, res: Response) => {
+  try {
+    const { status, modelSize, method, limit, offset } = req.query;
+    const experiments = await dbService.listExperiments({
+      status: status ? String(status) : undefined,
+      modelSize: modelSize ? String(modelSize) : undefined,
+      method: method ? String(method) : undefined,
+      limit: limit ? parseInt(String(limit), 10) : undefined,
+      offset: offset ? parseInt(String(offset), 10) : undefined,
+    });
+    return res.json({ experiments });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Save or create experiment
+app.post('/api/experiments', async (req: Request, res: Response) => {
+  try {
+    const exp = req.body;
+    if (!exp.name || !exp.modelSize || !exp.method) {
+      return res.status(400).json({ error: 'name, modelSize, and method are required' });
+    }
+    const saved = await dbService.saveExperiment(exp);
+    return res.status(201).json({ experiment: saved });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Get single experiment
+app.get('/api/experiments/:id', async (req: Request, res: Response) => {
+  try {
+    const exp = await dbService.getExperiment(req.params.id);
+    if (!exp) {
+      return res.status(404).json({ error: 'Experiment not found' });
+    }
+    return res.json({ experiment: exp });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Update metrics and status of experiment
+app.patch('/api/experiments/:id/metrics', async (req: Request, res: Response) => {
+  try {
+    const { metrics, status } = req.body;
+    const updated = await dbService.updateExperimentMetrics(req.params.id, metrics, status);
+    if (!updated) {
+      return res.status(404).json({ error: 'Experiment not found' });
+    }
+    return res.json({ experiment: updated });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete experiment
+app.delete('/api/experiments/:id', async (req: Request, res: Response) => {
+  try {
+    const deleted = await dbService.deleteExperiment(req.params.id);
+    return res.json({ success: deleted });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// List or filter audit logs
+app.get('/api/audit-logs', async (req: Request, res: Response) => {
+  try {
+    const { experimentId, eventType, severity, limit, offset } = req.query;
+    const result = await dbService.getAuditLogsWithCount({
+      experimentId: experimentId ? String(experimentId) : undefined,
+      eventType: eventType ? String(eventType) : undefined,
+      severity: severity ? (String(severity) as any) : undefined,
+      limit: limit ? parseInt(String(limit), 10) : undefined,
+      offset: offset ? parseInt(String(offset), 10) : undefined,
+    });
+    return res.json({ logs: result.logs, total: result.total });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Create audit log
+app.post('/api/audit-logs', async (req: Request, res: Response) => {
+  try {
+    const log = req.body;
+    if (!log.target || !log.eventType || !log.severity) {
+      return res.status(400).json({ error: 'target, eventType, and severity are required' });
+    }
+    const saved = await dbService.saveAuditLog(log);
+    return res.status(201).json({ log: saved });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Database status & telemetry
+app.get('/api/db/status', async (_req: Request, res: Response) => {
+  try {
+    const status = await dbService.getDatabaseStatus();
+    return res.json({ status });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ----------------------------------------------------
+// Gemini Multi-Turn Chatbot Endpoint
+// ----------------------------------------------------
+app.post('/api/gemini/chat', async (req: Request, res: Response) => {
+  try {
+    const { messages, systemInstruction, model } = req.body;
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'Messages array is required' });
+    }
+
+    // Model selection per guidelines:
+    // 'gemini-4-argon' for complex tasks
+    // 'gemini-3.8-flash' for general tasks (default)
+    // 'gemini-3.1-flash-lite' for fast tasks
+    const selectedModel = model === 'gemini-4-argon'
+      ? 'gemini-4-argon'
+      : model === 'gemini-3.1-flash-lite'
+      ? 'gemini-3.1-flash-lite'
+      : 'gemini-3.8-flash';
+
+    const defaultInstruction = `You are the Qwen Agent Studio Assistant. You are an expert in autonomous code reasoning, AST invariants, memory safety (Rust borrow checker, C pointers, lifetime bounds), concurrency hazards (race conditions, deadlocks), and LLM reasoning model training (QLoRA, LoRA, GRPO rollouts, DPO alignment). Always give structured, rigorous, code-grounded explanations with code snippets where helpful.`;
+    const finalInstruction = systemInstruction || defaultInstruction;
+
+    if (apiKey) {
+      try {
+        const contents = messages.map((m: { role: string; text: string }) => ({
+          role: m.role === 'assistant' ? 'model' : m.role,
+          parts: [{ text: m.text }],
+        }));
+
+        const response = await ai.models.generateContent({
+          model: selectedModel,
+          contents: contents,
+          config: {
+            systemInstruction: finalInstruction,
+          },
+        });
+
+        const replyText = response.text || '';
+        return res.json({
+          reply: replyText,
+          model: selectedModel,
+        });
+      } catch (geminiError: any) {
+        console.error('Gemini Chat API Error:', geminiError);
+        const errMsg = geminiError.message || String(geminiError);
+        const fallback = generateChatFallback(messages, finalInstruction, selectedModel);
+        return res.json({
+          reply: fallback,
+          model: selectedModel,
+          notice: `Gemini live call error: ${errMsg}. Showing contextual response.`,
+        });
+      }
+    }
+
+    const fallback = generateChatFallback(messages, finalInstruction, selectedModel);
+    return res.json({
+      reply: fallback,
+      model: selectedModel,
+      isFallback: true,
+    });
+  } catch (err: any) {
+    console.error('Server error in /api/gemini/chat:', err);
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
+});
+
+function generateChatFallback(messages: any[], systemInstruction: string, model: string): string {
+  const lastMsg = messages[messages.length - 1]?.text?.toLowerCase() || '';
+
+  if (lastMsg.includes('rust') || lastMsg.includes('borrow') || lastMsg.includes('refcell')) {
+    return `[${model}] In Rust, the fundamental invariant is Aliasing XOR Mutability (borrow checker rule E0502).
+
+When multiple threads or scopes access a RefCell<T>, calling \`borrow()\` and \`borrow_mut()\` concurrently in overlapping lexical scopes triggers an immediate runtime panic \`AlreadyBorrowed\`.
+
+To fix:
+1. Wrap the read borrow in an explicit nested scope \`{ let val = cell.borrow(); ... }\` so the \`Ref\` guard is dropped before calling \`borrow_mut()\`.
+2. For multi-threaded concurrency, use \`Arc<RwLock<T>>\` or \`Arc<Mutex<T>>\` instead of single-threaded \`Rc<RefCell<T>>\`.`;
+  }
+
+  if (lastMsg.includes('training') || lastMsg.includes('hyperparameter') || lastMsg.includes('vram') || lastMsg.includes('grpo')) {
+    return `[${model}] Regarding reasoning model training and VRAM dynamics:
+- **Optimizer**: Switching to \`paged_adamw_8bit\` reduces optimizer memory by ~75% compared to standard AdamW (from 8 bytes/param to 2 bytes/param) with negligible loss degradation.
+- **GRPO**: Group Relative Policy Optimization samples groups of rollouts (typically 4-8 rollouts per prompt) and computes relative advantages without a separate value model, saving ~20% GPU memory.
+- **Micro-Batching**: Pair micro-batch size of 2 with gradient accumulation of 8 to achieve an effective batch size of 16 while fitting within 16-24GB VRAM.`;
+  }
+
+  if (lastMsg.includes('concurrency') || lastMsg.includes('deadlock') || lastMsg.includes('mutex')) {
+    return `[${model}] Deadlock detection analysis:
+An AB-BA deadlock occurs when Thread 1 locks Resource A then requests Resource B, while Thread 2 locks Resource B then requests Resource A.
+
+Resolution strategies:
+1. **Strict Lock Ordering**: Establish a globally consistent acquisition order across all call-sites.
+2. **Try-Lock with Backoff**: Use \`try_lock()\` with exponential jitter to avoid indefinite priority inversion.
+3. **Lock-Free Queues**: Utilize crossbeam ring buffers or atomic compare-and-swap (CAS) primitives.`;
+  }
+
+  return `[${model}] I am your Gemini assistant configured with role instructions: "${systemInstruction.slice(0, 100)}...".
+
+I can help you:
+1. Audit and refactor code across Python, Rust, Java, C, and C++.
+2. Explain compiler errors, borrow checker conflicts, and memory leaks.
+3. Optimize hyperparameters (learning rates, LoRA rank/alpha, optimizers) for Qwen reasoning fine-tuning.
+4. Synthesize verifiable differential patches.
+
+What code block or training configuration would you like to examine?`;
+}
+
 
 // Vite middleware in dev or static serving in production
 async function startServer() {
