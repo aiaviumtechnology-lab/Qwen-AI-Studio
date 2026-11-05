@@ -1,7 +1,7 @@
 import React from 'react';
-import { Bot, Play, Loader2, Sparkles, CheckCircle2, LayoutDashboard } from 'lucide-react';
+import { Bot, Play, Loader2, Sparkles, CheckCircle2, LayoutDashboard, Brain } from 'lucide-react';
 
-export type ActiveTab = 'dashboard' | 'gemini-chat' | 'agent-studio' | 'repo-workbench' | 'rca-engine' | 'reasoning' | 'diff' | 'bpe' | 'training' | 'exporter';
+export type ActiveTab = 'dashboard' | 'reasoning-paradigms' | 'gemini-chat' | 'agent-studio' | 'repo-workbench' | 'rca-engine' | 'reasoning' | 'diff' | 'bpe' | 'training' | 'exporter';
 
 interface HeaderProps {
   activeTab: ActiveTab;
@@ -61,6 +61,19 @@ export const Header: React.FC<HeaderProps> = ({
           <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
           <span>Gemini Chat</span>
           {activeTab === 'gemini-chat' && (
+            <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500" />
+          )}
+        </button>
+
+        <button
+          onClick={() => setActiveTab('reasoning-paradigms')}
+          className={`hover:text-white transition-colors whitespace-nowrap py-1 relative flex items-center gap-1.5 ${
+            activeTab === 'reasoning-paradigms' ? 'text-indigo-400 font-semibold' : ''
+          }`}
+        >
+          <Brain className="w-3.5 h-3.5 text-indigo-400" />
+          <span>CoT · ToT · TreEvo</span>
+          {activeTab === 'reasoning-paradigms' && (
             <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-indigo-500" />
           )}
         </button>

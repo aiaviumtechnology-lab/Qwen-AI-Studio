@@ -10,6 +10,7 @@ import { TrainingStudio } from './components/TrainingStudio';
 import { RcaEngine } from './components/RcaEngine';
 import { OpsDashboard } from './components/OpsDashboard';
 import { GeminiChatbot } from './components/GeminiChatbot';
+import { ReasoningParadigmStudio } from './components/ReasoningParadigmStudio';
 import { DEFAULT_AGENTS } from './data/defaultAgents';
 import { PRESET_REPOSITORIES } from './data/presetRepos';
 import { AgentConfig, PresetRepository, AuditResult, CodeIssue, PatchedFile } from './types/agent';
@@ -116,6 +117,14 @@ export default function App() {
           <GeminiChatbot
             currentRepo={currentRepo}
             activeFilePath={activeFilePath}
+          />
+        )}
+
+        {activeTab === 'reasoning-paradigms' && (
+          <ReasoningParadigmStudio
+            currentRepo={currentRepo}
+            activeFilePath={activeFilePath}
+            currentAgent={currentAgent}
           />
         )}
 
