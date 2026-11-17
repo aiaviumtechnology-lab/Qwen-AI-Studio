@@ -470,6 +470,29 @@ Return ONLY valid JSON with this structure:
 
     const finalOutput = stepResults[stepResults.length - 1]?.thought || 'RCA execution completed.';
 
+    try {
+      await dbService.saveReasoningRun({
+        paradigm: 'rca',
+        targetFile: targetFile.path,
+        goal,
+        result: { plan: { goal, steps: planSteps }, step_results: stepResults, final_output: finalOutput },
+        elapsedMs: 420,
+      });
+      await dbService.saveAuditLog({
+        target: `${targetFile.path} (RCA Engine)`,
+        eventType: 'REASONING_PARADIGM_RUN',
+        severity: 'info',
+        details: {
+          summary: `RCA ReasoningEngine executed ${planSteps.length} steps for "${goal}"`,
+          paradigm: 'rca',
+          totalSteps: planSteps.length,
+        },
+        actor: 'RCAEngine',
+      });
+    } catch (persistErr) {
+      console.warn('Non-fatal: Failed to persist RCA run:', persistErr);
+    }
+
     return res.json({
       goal,
       plan: { goal, steps: planSteps },
@@ -544,15 +567,41 @@ app.post('/api/agent/reasoning-paradigms', async (req: Request, res: Response) =
         },
       ];
 
-      return res.json({
-        paradigm: 'cot',
+      const payload = {
+        paradigm: 'cot' as const,
         goal: effectiveGoal,
         totalTokens: 966,
         elapsedMs: 385,
         steps,
         conclusion: `Chain of Thought audit complete: Detected 2 critical invariant defects in ${filePath}. Scope confinement and strict lock hierarchy synthesized.`,
         synthesizedFix: `// Verified Invariant Patch applied to ${filePath}\n{\n    let val = cell.borrow();\n    println!("read: {}", *val);\n}\ncell.borrow_mut();`,
-      });
+      };
+
+      try {
+        await dbService.saveReasoningRun({
+          paradigm: 'cot',
+          targetFile: filePath,
+          goal: effectiveGoal,
+          result: payload,
+          elapsedMs: payload.elapsedMs,
+        });
+        await dbService.saveAuditLog({
+          target: `${filePath} (CoT)`,
+          eventType: 'REASONING_PARADIGM_RUN',
+          severity: 'info',
+          details: {
+            summary: payload.conclusion,
+            paradigm: 'cot',
+            totalTokens: payload.totalTokens,
+            stepsCount: steps.length,
+          },
+          actor: 'ReasoningEngine-CoT',
+        });
+      } catch (persistErr) {
+        console.warn('Non-fatal: Failed to persist CoT run:', persistErr);
+      }
+
+      return res.json(payload);
     }
 
     // 2. TREE OF THOUGHTS (ToT)
@@ -634,8 +683,8 @@ app.post('/api/agent/reasoning-paradigms', async (req: Request, res: Response) =
         },
       };
 
-      return res.json({
-        paradigm: 'tot',
+      const payload = {
+        paradigm: 'tot' as const,
         goal: effectiveGoal,
         rootId,
         nodes,
@@ -645,7 +694,33 @@ app.post('/api/agent/reasoning-paradigms', async (req: Request, res: Response) =
         backtrackCount: 1,
         elapsedMs: 512,
         selectedSolution: 'Optimal Branch B1: Lexical Scope Isolation + Normalized Lock Acquisition Order.',
-      });
+      };
+
+      try {
+        await dbService.saveReasoningRun({
+          paradigm: 'tot',
+          targetFile: filePath,
+          goal: effectiveGoal,
+          result: payload,
+          elapsedMs: payload.elapsedMs,
+        });
+        await dbService.saveAuditLog({
+          target: `${filePath} (ToT)`,
+          eventType: 'REASONING_PARADIGM_RUN',
+          severity: 'info',
+          details: {
+            summary: payload.selectedSolution,
+            paradigm: 'tot',
+            branchesExplored: payload.totalBranchesExplored,
+            prunedCount: payload.prunedBranchesCount,
+          },
+          actor: 'ReasoningEngine-ToT',
+        });
+      } catch (persistErr) {
+        console.warn('Non-fatal: Failed to persist ToT run:', persistErr);
+      }
+
+      return res.json(payload);
     }
 
     // 3. TREE-EVOLUTIONARY REASONING (TreEvo)
@@ -770,8 +845,8 @@ app.post('/api/agent/reasoning-paradigms', async (req: Request, res: Response) =
         },
       ];
 
-      return res.json({
-        paradigm: 'treevo',
+      const payload = {
+        paradigm: 'treevo' as const,
         goal: effectiveGoal,
         generations,
         convergenceGeneration: 3,
@@ -785,7 +860,32 @@ app.post('/api/agent/reasoning-paradigms', async (req: Request, res: Response) =
           { generation: 2, avgFitness: 88.5, topFitness: 94.2 },
           { generation: 3, avgFitness: 97.4, topFitness: 98.6 },
         ],
-      });
+      };
+
+      try {
+        await dbService.saveReasoningRun({
+          paradigm: 'treevo',
+          targetFile: filePath,
+          goal: effectiveGoal,
+          result: payload,
+          elapsedMs: payload.elapsedMs,
+        });
+        await dbService.saveAuditLog({
+          target: `${filePath} (TreEvo)`,
+          eventType: 'REASONING_PARADIGM_RUN',
+          severity: 'info',
+          details: {
+            summary: `TreEvo converged in ${payload.convergenceGeneration} generations (top fitness ${payload.championCandidate.fitness.totalFitness})`,
+            paradigm: 'treevo',
+            championFitness: payload.championCandidate.fitness.totalFitness,
+          },
+          actor: 'ReasoningEngine-TreEvo',
+        });
+      } catch (persistErr) {
+        console.warn('Non-fatal: Failed to persist TreEvo run:', persistErr);
+      }
+
+      return res.json(payload);
     }
 
     return res.status(400).json({ error: 'Invalid paradigm. Expected "cot", "tot", or "treevo".' });
@@ -978,6 +1078,49 @@ app.get('/api/db/status', async (_req: Request, res: Response) => {
   try {
     const status = await dbService.getDatabaseStatus();
     return res.json({ status });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Hyperparameter presets persistence endpoints
+app.get('/api/presets', async (_req: Request, res: Response) => {
+  try {
+    const presets = await dbService.listPresets();
+    return res.json({ presets });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/presets', async (req: Request, res: Response) => {
+  try {
+    const preset = req.body;
+    if (!preset || !preset.name || !preset.config) {
+      return res.status(400).json({ error: 'name and config are required' });
+    }
+    const saved = await dbService.savePreset(preset);
+    return res.status(201).json({ preset: saved });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/presets/:id', async (req: Request, res: Response) => {
+  try {
+    const deleted = await dbService.deletePreset(req.params.id);
+    return res.json({ success: deleted });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Reasoning paradigm run history endpoint
+app.get('/api/reasoning-runs', async (req: Request, res: Response) => {
+  try {
+    const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 50;
+    const runs = await dbService.listReasoningRuns(limit);
+    return res.json({ runs });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }

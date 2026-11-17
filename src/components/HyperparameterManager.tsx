@@ -179,6 +179,42 @@ export const HyperparameterManager: React.FC<HyperparameterManagerProps> = ({
   const [importJsonText, setImportJsonText] = useState('');
   const [showImportBox, setShowImportBox] = useState(false);
 
+  // Load saved custom presets from PostgreSQL on mount
+  useEffect(() => {
+    let active = true;
+    const loadPresets = async () => {
+      try {
+        const res = await fetch('/api/presets');
+        if (!res.ok) return;
+        const data = await res.json();
+        const serverPresets: HyperparameterPreset[] = Array.isArray(data.presets) ? data.presets : [];
+        if (!active || serverPresets.length === 0) return;
+
+        setPresets((prev) => {
+          const customFromServer = serverPresets.filter((p) => !p.isDefault);
+          const customIds = new Set(customFromServer.map((p) => p.id));
+          const builtinIds = new Set(BUILTIN_PRESETS.map((p) => p.id));
+          const localOnlyCustom = prev.filter(
+            (p) => !p.isDefault && !builtinIds.has(p.id) && !customIds.has(p.id)
+          );
+          const merged = [...customFromServer, ...localOnlyCustom, ...BUILTIN_PRESETS];
+          try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+          } catch {
+            // ignore storage errors
+          }
+          return merged;
+        });
+      } catch {
+        // Offline / fallback to localStorage cache
+      }
+    };
+    loadPresets();
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // Sync presets to localStorage
   const savePresetsToStorage = (updated: HyperparameterPreset[]) => {
     setPresets(updated);
@@ -226,7 +262,7 @@ export const HyperparameterManager: React.FC<HyperparameterManagerProps> = ({
   };
 
   // Save new preset
-  const handleConfirmSavePreset = (e: React.FormEvent) => {
+  const handleConfirmSavePreset = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newPresetName.trim()) return;
 
@@ -244,10 +280,20 @@ export const HyperparameterManager: React.FC<HyperparameterManagerProps> = ({
     setActivePresetId(newPreset.id);
     setIsSaveModalOpen(false);
     showToast(`Configuration "${newPreset.name}" saved!`);
+
+    try {
+      await fetch('/api/presets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newPreset),
+      });
+    } catch (err) {
+      console.error('Failed to persist preset to database:', err);
+    }
   };
 
   // Delete preset
-  const handleDeletePreset = (id: string) => {
+  const handleDeletePreset = async (id: string) => {
     const target = presets.find((p) => p.id === id);
     if (!target || target.isDefault) return;
 
@@ -258,6 +304,14 @@ export const HyperparameterManager: React.FC<HyperparameterManagerProps> = ({
       onChangeConfig({ ...BUILTIN_PRESETS[0].config });
     }
     showToast(`Deleted preset "${target.name}"`);
+
+    try {
+      await fetch(`/api/presets/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+      });
+    } catch (err) {
+      console.error('Failed to delete preset from database:', err);
+    }
   };
 
   // Export current config as JSON file
@@ -281,7 +335,7 @@ export const HyperparameterManager: React.FC<HyperparameterManagerProps> = ({
   };
 
   // Import JSON configuration
-  const handleImportJson = () => {
+  const handleImportJson = async () => {
     try {
       const parsed = JSON.parse(importJsonText);
       const importedConfig: TrainingConfig = parsed.config || parsed;
@@ -315,18 +369,35 @@ export const HyperparameterManager: React.FC<HyperparameterManagerProps> = ({
       setShowImportBox(false);
       setImportJsonText('');
       showToast('Configuration imported successfully!');
+
+      try {
+        await fetch('/api/presets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(importedPreset),
+        });
+      } catch (err) {
+        console.error('Failed to persist imported preset:', err);
+      }
     } catch (err: any) {
-      alert(`Failed to import configuration JSON: ${err?.message || 'Invalid format'}`);
+      showToast(`Import failed: ${err?.message || 'Invalid JSON format'}`);
     }
   };
 
   // Reset to factory defaults
-  const handleResetDefaults = () => {
-    if (window.confirm('Reset all presets to factory default configurations? Custom presets will be removed.')) {
-      savePresetsToStorage(BUILTIN_PRESETS);
-      setActivePresetId(BUILTIN_PRESETS[0].id);
-      onChangeConfig({ ...BUILTIN_PRESETS[0].config });
-      showToast('Presets reset to factory defaults');
+  const handleResetDefaults = async () => {
+    const customIds = presets.filter((p) => !p.isDefault).map((p) => p.id);
+    savePresetsToStorage(BUILTIN_PRESETS);
+    setActivePresetId(BUILTIN_PRESETS[0].id);
+    onChangeConfig({ ...BUILTIN_PRESETS[0].config });
+    showToast('Presets reset to factory defaults');
+
+    for (const id of customIds) {
+      try {
+        await fetch(`/api/presets/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      } catch {
+        // ignore
+      }
     }
   };
 

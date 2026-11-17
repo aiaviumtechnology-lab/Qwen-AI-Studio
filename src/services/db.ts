@@ -1,5 +1,5 @@
 import type { Pool as PgPoolType, PoolConfig } from 'pg';
-import type { QwenModelSize, FineTuningMethod, TrainingConfig } from '../types/agent';
+import type { QwenModelSize, FineTuningMethod, TrainingConfig, HyperparameterPreset } from '../types/agent';
 
 // ----------------------------------------------------
 // Data Model Interfaces for PostgreSQL Service Layer
@@ -55,11 +55,22 @@ export interface AuditLogRecord {
     | 'HYPERPARAMETER_UPDATED'
     | 'DATASET_VALIDATED'
     | 'MODEL_CHECKPOINT_SAVED'
+    | 'REASONING_PARADIGM_RUN'
     | 'SYSTEM_EVENT';
   severity: AuditSeverity;
   details: Record<string, any>;
   timestamp: string;
   actor?: string;
+}
+
+export interface ReasoningRunRecord {
+  id: string;
+  paradigm: 'cot' | 'tot' | 'treevo' | 'rca';
+  targetFile: string;
+  goal: string;
+  result: Record<string, any>;
+  elapsedMs: number;
+  createdAt: string;
 }
 
 export interface ExperimentFilter {
@@ -427,6 +438,10 @@ declare global {
   var _inMemoryExperiments: Map<string, TrainingExperimentRecord> | undefined;
   // eslint-disable-next-line no-var
   var _inMemoryAuditLogs: AuditLogRecord[] | undefined;
+  // eslint-disable-next-line no-var
+  var _inMemoryPresets: Map<string, HyperparameterPreset> | undefined;
+  // eslint-disable-next-line no-var
+  var _inMemoryReasoningRuns: ReasoningRunRecord[] | undefined;
 }
 
 // ----------------------------------------------------
@@ -448,6 +463,12 @@ export class PostgresService {
     if (!globalThis._inMemoryAuditLogs || globalThis._inMemoryAuditLogs.length < INITIAL_AUDIT_LOGS.length) {
       globalThis._inMemoryAuditLogs = [...INITIAL_AUDIT_LOGS];
     }
+    if (!globalThis._inMemoryPresets) {
+      globalThis._inMemoryPresets = new Map<string, HyperparameterPreset>();
+    }
+    if (!globalThis._inMemoryReasoningRuns) {
+      globalThis._inMemoryReasoningRuns = [];
+    }
   }
 
   /**
@@ -457,6 +478,25 @@ export class PostgresService {
     const isNode = typeof process !== 'undefined' && process.env;
     if (!isNode) return false;
     return Boolean(process.env.SQL_HOST && process.env.SQL_USER && process.env.SQL_DB_NAME);
+  }
+
+  private resolveSslConfig(): PoolConfig['ssl'] {
+    const raw = (process.env.SQL_SSL || '').trim().toLowerCase();
+    if (!raw || raw === 'false' || raw === '0' || raw === 'disable' || raw === 'off' || raw === 'no') {
+      return false;
+    }
+
+    const ca = process.env.SQL_SSL_CA?.trim() || undefined;
+    if (raw === 'verify-full' || raw === 'verify-ca' || raw === 'strict') {
+      return { rejectUnauthorized: true, ...(ca ? { ca } : {}) };
+    }
+
+    if (raw === 'true' || raw === '1' || raw === 'require' || raw === 'yes' || raw === 'on') {
+      const rejectUnauthorized = (process.env.SQL_SSL_REJECT_UNAUTHORIZED || '').trim().toLowerCase() === 'true';
+      return { rejectUnauthorized, ...(ca ? { ca } : {}) };
+    }
+
+    return false;
   }
 
   /**
@@ -487,7 +527,7 @@ export class PostgresService {
         password: process.env.SQL_PASSWORD,
         database: process.env.SQL_DB_NAME,
         port: process.env.SQL_PORT ? parseInt(process.env.SQL_PORT, 10) : 5432,
-        ssl: process.env.SQL_SSL === 'true' ? { rejectUnauthorized: false } : false,
+        ssl: this.resolveSslConfig(),
         max: 10,
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 5000,
@@ -541,14 +581,84 @@ export class PostgresService {
         actor VARCHAR(128) DEFAULT 'System'
       );
 
+      CREATE TABLE IF NOT EXISTS hyperparameter_presets (
+        id VARCHAR(128) PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        is_default BOOLEAN NOT NULL DEFAULT false,
+        config JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS reasoning_runs (
+        id VARCHAR(128) PRIMARY KEY,
+        paradigm VARCHAR(32) NOT NULL,
+        target_file VARCHAR(255) NOT NULL,
+        goal TEXT NOT NULL,
+        result JSONB NOT NULL DEFAULT '{}'::jsonb,
+        elapsed_ms INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+
       CREATE INDEX IF NOT EXISTS idx_experiments_status ON training_experiments(status);
       CREATE INDEX IF NOT EXISTS idx_experiments_created ON training_experiments(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_experiment ON audit_logs(experiment_id);
       CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_logs(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_reasoning_created ON reasoning_runs(created_at DESC);
     `;
 
     try {
       await pool.query(createTablesQuery);
+
+      // Idempotently seed initial baseline records if tables are empty
+      const expCountRes = await pool.query('SELECT COUNT(*)::int AS cnt FROM training_experiments');
+      if ((expCountRes.rows[0]?.cnt ?? 0) === 0) {
+        for (const exp of INITIAL_EXPERIMENTS) {
+          await pool.query(
+            `INSERT INTO training_experiments (
+              id, name, model_size, method, config, dataset_id,
+              dataset_sample_size, status, metrics, created_at, updated_at, completed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (id) DO NOTHING`,
+            [
+              exp.id,
+              exp.name,
+              exp.modelSize,
+              exp.method,
+              JSON.stringify(exp.config),
+              exp.datasetId || null,
+              exp.datasetSampleSize || null,
+              exp.status,
+              JSON.stringify(exp.metrics || {}),
+              exp.createdAt,
+              exp.updatedAt,
+              exp.completedAt || null,
+            ]
+          );
+        }
+      }
+
+      const logCountRes = await pool.query('SELECT COUNT(*)::int AS cnt FROM audit_logs');
+      if ((logCountRes.rows[0]?.cnt ?? 0) === 0) {
+        for (const log of INITIAL_AUDIT_LOGS) {
+          await pool.query(
+            `INSERT INTO audit_logs (id, experiment_id, target, event_type, severity, details, timestamp, actor)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (id) DO NOTHING`,
+            [
+              log.id,
+              log.experimentId || null,
+              log.target,
+              log.eventType,
+              log.severity,
+              JSON.stringify(log.details),
+              log.timestamp,
+              log.actor || 'System',
+            ]
+          );
+        }
+      }
+
       this.schemaInitialized = true;
     } catch (error: any) {
       console.error('Database schema initialization error:', error.message);
@@ -682,15 +792,14 @@ export class PostgresService {
         }
 
         const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-        const limitClause = filter.limit ? `LIMIT ${filter.limit}` : 'LIMIT 100';
-        const offsetClause = filter.offset ? `OFFSET ${filter.offset}` : '';
+        const limitVal = Math.max(1, Math.min(500, filter.limit || 100));
+        const offsetVal = Math.max(0, filter.offset || 0);
+        params.push(limitVal, offsetVal);
 
-        const sql = `SELECT * FROM training_experiments ${whereClause} ORDER BY created_at DESC ${limitClause} ${offsetClause};`;
+        const sql = `SELECT * FROM training_experiments ${whereClause} ORDER BY created_at DESC LIMIT $${paramIdx++} OFFSET $${paramIdx++};`;
         const result = await pool.query(sql, params);
 
-        if (result.rows.length > 0) {
-          return result.rows.map((row) => this.mapExperimentRow(row));
-        }
+        return result.rows.map((row) => this.mapExperimentRow(row));
       } catch (err: any) {
         console.error('PostgreSQL listExperiments failed, using fallback store:', err.message);
       }
@@ -854,24 +963,23 @@ export class PostgresService {
         }
 
         const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-        const limitClause = filter.limit ? `LIMIT ${filter.limit}` : 'LIMIT 100';
-        const offsetClause = filter.offset ? `OFFSET ${filter.offset}` : '';
+        const safeLimit = Math.max(1, Math.min(500, Number(filter.limit) || 100));
+        const safeOffset = Math.max(0, Number(filter.offset) || 0);
+        params.push(safeLimit, safeOffset);
 
-        const sql = `SELECT * FROM audit_logs ${whereClause} ORDER BY timestamp DESC ${limitClause} ${offsetClause};`;
+        const sql = `SELECT * FROM audit_logs ${whereClause} ORDER BY timestamp DESC LIMIT $${paramIdx++} OFFSET $${paramIdx++};`;
         const result = await pool.query(sql, params);
 
-        if (result.rows.length > 0) {
-          return result.rows.map((row) => ({
-            id: row.id,
-            experimentId: row.experiment_id,
-            target: row.target,
-            eventType: row.event_type,
-            severity: row.severity,
-            details: typeof row.details === 'string' ? JSON.parse(row.details) : row.details,
-            timestamp: new Date(row.timestamp).toISOString(),
-            actor: row.actor,
-          }));
-        }
+        return result.rows.map((row) => ({
+          id: row.id,
+          experimentId: row.experiment_id,
+          target: row.target,
+          eventType: row.event_type,
+          severity: row.severity,
+          details: typeof row.details === 'string' ? JSON.parse(row.details) : row.details,
+          timestamp: new Date(row.timestamp).toISOString(),
+          actor: row.actor,
+        }));
       } catch (err: any) {
         console.error('PostgreSQL getAuditLogs query failed, using fallback:', err.message);
       }
@@ -882,8 +990,8 @@ export class PostgresService {
     if (filter.eventType) logs = logs.filter((l) => l.eventType === filter.eventType);
     if (filter.severity) logs = logs.filter((l) => l.severity === filter.severity);
 
-    const start = filter.offset || 0;
-    const end = start + (filter.limit || 100);
+    const start = Math.max(0, Number(filter.offset) || 0);
+    const end = start + Math.max(1, Math.min(500, Number(filter.limit) || 100));
     return logs.slice(start, end);
   }
 
@@ -918,11 +1026,12 @@ export class PostgresService {
         );
         const total = parseInt(countRes.rows[0]?.total || '0', 10);
 
-        const limitClause = filter.limit ? `LIMIT ${filter.limit}` : 'LIMIT 100';
-        const offsetClause = filter.offset ? `OFFSET ${filter.offset}` : '';
+        const safeLimit = Math.max(1, Math.min(500, Number(filter.limit) || 100));
+        const safeOffset = Math.max(0, Number(filter.offset) || 0);
+        const queryParams = [...params, safeLimit, safeOffset];
 
-        const sql = `SELECT * FROM audit_logs ${whereClause} ORDER BY timestamp DESC ${limitClause} ${offsetClause};`;
-        const result = await pool.query(sql, params);
+        const sql = `SELECT * FROM audit_logs ${whereClause} ORDER BY timestamp DESC LIMIT $${paramIdx++} OFFSET $${paramIdx++};`;
+        const result = await pool.query(sql, queryParams);
 
         const logs = result.rows.map((row) => ({
           id: row.id,
@@ -947,8 +1056,8 @@ export class PostgresService {
     if (filter.severity) all = all.filter((l) => l.severity === filter.severity);
 
     const total = all.length;
-    const start = filter.offset || 0;
-    const end = start + (filter.limit || 100);
+    const start = Math.max(0, Number(filter.offset) || 0);
+    const end = start + Math.max(1, Math.min(500, Number(filter.limit) || 100));
     return { logs: all.slice(start, end), total };
   }
 
@@ -983,6 +1092,160 @@ export class PostgresService {
     }
 
     return deletedCount;
+  }
+
+  // ----------------------------------------------------
+  // Hyperparameter Presets Persistence
+  // ----------------------------------------------------
+
+  public async listPresets(): Promise<HyperparameterPreset[]> {
+    const pool = await this.getPool();
+    if (pool) {
+      try {
+        await this.ensureSchema(pool);
+        const result = await pool.query(
+          'SELECT * FROM hyperparameter_presets ORDER BY created_at DESC LIMIT 100;'
+        );
+        return result.rows.map((row) => ({
+          id: row.id,
+          name: row.name,
+          description: row.description,
+          isDefault: Boolean(row.is_default),
+          createdAt: new Date(row.created_at).toISOString(),
+          config: typeof row.config === 'string' ? JSON.parse(row.config) : row.config,
+        }));
+      } catch (err: any) {
+        console.error('PostgreSQL listPresets failed, using fallback:', err.message);
+      }
+    }
+
+    return Array.from(globalThis._inMemoryPresets?.values() || []).sort(
+      (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    );
+  }
+
+  public async savePreset(preset: HyperparameterPreset): Promise<HyperparameterPreset> {
+    const record: HyperparameterPreset = {
+      ...preset,
+      id: preset.id || `user-preset-${Date.now()}`,
+      createdAt: preset.createdAt || new Date().toISOString(),
+    };
+
+    const pool = await this.getPool();
+    if (pool) {
+      try {
+        await this.ensureSchema(pool);
+        await pool.query(
+          `INSERT INTO hyperparameter_presets (id, name, description, is_default, config, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (id) DO UPDATE SET
+             name = EXCLUDED.name,
+             description = EXCLUDED.description,
+             config = EXCLUDED.config;`,
+          [
+            record.id,
+            record.name,
+            record.description || '',
+            Boolean(record.isDefault),
+            JSON.stringify(record.config),
+            record.createdAt,
+          ]
+        );
+      } catch (err: any) {
+        console.error('PostgreSQL savePreset failed:', err.message);
+      }
+    }
+
+    globalThis._inMemoryPresets!.set(record.id, record);
+    return record;
+  }
+
+  public async deletePreset(id: string): Promise<boolean> {
+    const pool = await this.getPool();
+    if (pool) {
+      try {
+        await this.ensureSchema(pool);
+        await pool.query('DELETE FROM hyperparameter_presets WHERE id = $1', [id]);
+      } catch (err: any) {
+        console.error('PostgreSQL deletePreset failed:', err.message);
+      }
+    }
+    return globalThis._inMemoryPresets?.delete(id) || false;
+  }
+
+  // ----------------------------------------------------
+  // Reasoning Runs Persistence (CoT, ToT, TreEvo, RCA)
+  // ----------------------------------------------------
+
+  public async saveReasoningRun(
+    run: Omit<ReasoningRunRecord, 'id' | 'createdAt'> & { id?: string; createdAt?: string }
+  ): Promise<ReasoningRunRecord> {
+    const record: ReasoningRunRecord = {
+      id: run.id || `reason_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      paradigm: run.paradigm,
+      targetFile: run.targetFile,
+      goal: run.goal,
+      result: run.result,
+      elapsedMs: run.elapsedMs || 0,
+      createdAt: run.createdAt || new Date().toISOString(),
+    };
+
+    const pool = await this.getPool();
+    if (pool) {
+      try {
+        await this.ensureSchema(pool);
+        await pool.query(
+          `INSERT INTO reasoning_runs (id, paradigm, target_file, goal, result, elapsed_ms, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7);`,
+          [
+            record.id,
+            record.paradigm,
+            record.targetFile,
+            record.goal,
+            JSON.stringify(record.result),
+            record.elapsedMs,
+            record.createdAt,
+          ]
+        );
+      } catch (err: any) {
+        console.error('PostgreSQL saveReasoningRun failed:', err.message);
+      }
+    }
+
+    if (!globalThis._inMemoryReasoningRuns) {
+      globalThis._inMemoryReasoningRuns = [];
+    }
+    globalThis._inMemoryReasoningRuns.unshift(record);
+    if (globalThis._inMemoryReasoningRuns.length > 200) {
+      globalThis._inMemoryReasoningRuns.pop();
+    }
+    return record;
+  }
+
+  public async listReasoningRuns(limit = 50): Promise<ReasoningRunRecord[]> {
+    const safeLimit = Math.max(1, Math.min(200, limit));
+    const pool = await this.getPool();
+    if (pool) {
+      try {
+        await this.ensureSchema(pool);
+        const res = await pool.query(
+          'SELECT * FROM reasoning_runs ORDER BY created_at DESC LIMIT $1;',
+          [safeLimit]
+        );
+        return res.rows.map((row) => ({
+          id: row.id,
+          paradigm: row.paradigm,
+          targetFile: row.target_file,
+          goal: row.goal,
+          result: typeof row.result === 'string' ? JSON.parse(row.result) : row.result,
+          elapsedMs: row.elapsed_ms,
+          createdAt: new Date(row.created_at).toISOString(),
+        }));
+      } catch (err: any) {
+        console.error('PostgreSQL listReasoningRuns failed:', err.message);
+      }
+    }
+    return (globalThis._inMemoryReasoningRuns || []).slice(0, safeLimit);
   }
 
   // ----------------------------------------------------

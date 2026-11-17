@@ -13,6 +13,7 @@ import {
   Sparkles,
   FileCode,
   ShieldCheck,
+  Download,
 } from 'lucide-react';
 
 interface ReasoningTraceProps {
@@ -30,6 +31,7 @@ export const ReasoningTrace: React.FC<ReasoningTraceProps> = ({
 }) => {
   const [isThinkingExpanded, setIsThinkingExpanded] = useState(true);
   const [copiedThinking, setCopiedThinking] = useState(false);
+  const [isExported, setIsExported] = useState(false);
   const [severityFilter, setSeverityFilter] = useState<'all' | 'critical' | 'warning' | 'info'>('all');
 
   if (!auditResult) {
@@ -60,6 +62,60 @@ export const ReasoningTrace: React.FC<ReasoningTraceProps> = ({
     setTimeout(() => setCopiedThinking(false), 2000);
   };
 
+  const handleExportReport = () => {
+    if (!auditResult) return;
+
+    const reportPayload = {
+      reportTitle: 'Qwen Autonomous Code Reasoning & Diagnostic Audit Report',
+      exportTimestamp: new Date().toISOString(),
+      auditTimestamp: auditResult.timestamp,
+      agentUsed: auditResult.agentUsed,
+      summary: auditResult.summary,
+      metrics: {
+        totalIssues: auditResult.issues.length,
+        criticalCount,
+        warningCount,
+        infoCount: auditResult.issues.filter((i) => i.severity === 'info').length,
+        patchedFilesCount: auditResult.patchedFiles.length,
+      },
+      reasoningTrace: auditResult.thinking,
+      issues: auditResult.issues.map((issue) => ({
+        id: issue.id,
+        severity: issue.severity,
+        file: issue.file,
+        line: issue.line,
+        column: issue.column,
+        title: issue.title,
+        explanation: issue.explanation,
+        rootCause: issue.rootCause,
+        ruleBroken: issue.ruleBroken,
+        suggestedFix: issue.suggestedFix,
+      })),
+      patchedFiles: auditResult.patchedFiles.map((patch) => ({
+        path: patch.path,
+        explanation: patch.explanation,
+        unifiedDiff: patch.unifiedDiff,
+        patchedContent: patch.patchedContent,
+      })),
+    };
+
+    const jsonBlob = new Blob([JSON.stringify(reportPayload, null, 2)], {
+      type: 'application/json',
+    });
+    const downloadUrl = URL.createObjectURL(jsonBlob);
+    const link = document.createElement('a');
+    link.href = downloadUrl;
+    const dateStr = new Date(auditResult.timestamp).toISOString().split('T')[0];
+    link.download = `audit-report-${auditResult.agentUsed.id || 'agent'}-${dateStr}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(downloadUrl);
+
+    setIsExported(true);
+    setTimeout(() => setIsExported(false), 2500);
+  };
+
   const filteredIssues = auditResult.issues.filter((issue) => {
     if (severityFilter === 'all') return true;
     return issue.severity === severityFilter;
@@ -88,8 +144,26 @@ export const ReasoningTrace: React.FC<ReasoningTraceProps> = ({
 
           <div className="flex items-center gap-2">
             <button
+              onClick={handleExportReport}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors shadow-sm cursor-pointer"
+              title="Download audit findings and reasoning trace as structured JSON"
+            >
+              {isExported ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="text-emerald-400 font-medium">Exported!</span>
+                </>
+              ) : (
+                <>
+                  <Download className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Export Audit Report</span>
+                </>
+              )}
+            </button>
+
+            <button
               onClick={onNavigateToDiff}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors shadow-sm"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg transition-colors shadow-sm cursor-pointer"
             >
               <GitCompare className="w-3.5 h-3.5" />
               <span>Inspect Unified Diffs</span>
