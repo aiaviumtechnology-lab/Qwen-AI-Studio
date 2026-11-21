@@ -1,6 +1,6 @@
 Summary of Implementation
 
-A dedicated Reasoning Paradigms Studio (ReasoningParadigmStudio) has been added to the application, accessible via the top navigation bar (CoT · ToT · TreEvo):
+A dedicated Reasoning Paradigms Studio based on Qwen3.5 (ReasoningParadigmStudio) has been added to the application, accessible via the top navigation bar (CoT · ToT · TreEvo):
 Chain of Thought (CoT):
 Linear Deductive Execution: Models step-by-step invariant deduction from AST scope extraction, memory ownership tracking (Rust aliasing XOR mutability, C buffer bounds), to concurrency lock verification.
 Metrics: Displays cumulative token consumption, step latency, and invariant verification confidence.
